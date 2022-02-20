@@ -1,0 +1,46 @@
+---
+- name: Generate CA
+  hosts: sp8-srv-20211221
+  remote_user: user
+
+  vars:
+    #    answer_file_CA_cert: ./answer_file_CA_cert
+    extension_file_KDC: ./extension_file_KDC
+    #    extension_file_user: ./extension_file_user
+
+  tasks:
+    - name: Remove demoCA
+      shell: rm -rf demoCA
+
+    - name: Create demoCA folder
+      shell: mkdir -pv demoCA/{certs,newcerts,private}
+    - shell: touch demoCA/index.txt
+    - shell: echo "01" > demoCA/serial
+
+    - name: Create CA key
+      shell: | 
+        openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
+        -outform PEM -out demoCA/private/cakey.pem
+
+    - name: Create CA cert
+      shell: |
+        openssl req -new -x509 -key demoCA/private/cakey.pem -out demoCA/certs/cacert.pem \
+        -extensions v3_ca -days +3650 -outform PEM \
+        -subj "/C=RU/ST=Moscow/O=Basealt/CN=CA"
+
+    - name: Create KDC key
+      shell: openssl genrsa -out demoCA/private/dc-key.pem 2048
+
+    - name: Create KDC req
+      shell: |
+        openssl req -new -out dc-req.pem -key demoCA/private/dc-key.pem \
+        -subj "/C=RU/ST=Moscow/O=Basealt/CN=dc2"
+
+    - name: Create (copy) extension file for KDC cert
+      copy: src={{ extension_file_KDC }} dest=demoCA/{{ extension_file_KDC }}
+
+    - name: Create KDC cert
+      shell: |
+        openssl ca -batch -in dc-req.pem -out demoCA/certs/dc-cert.pem \
+        -cert demoCA/certs/cacert.pem -extfile demoCA/{{ extension_file_KDC }} \
+        -extensions kdc_cert
