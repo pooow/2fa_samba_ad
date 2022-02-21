@@ -4,9 +4,9 @@
   remote_user: user
 
   vars:
-    #    answer_file_CA_cert: ./answer_file_CA_cert
     extension_file_KDC: ./extension_file_KDC
-    #    extension_file_user: ./extension_file_user
+    samba_2fa_id_token: 7947
+    samba_2fa_label_rutoken: 2fa_samba_ad
 
   tasks:
     - name: Remove demoCA
@@ -40,7 +40,105 @@
       copy: src={{ extension_file_KDC }} dest=demoCA/{{ extension_file_KDC }}
 
     - name: Create KDC cert
-      shell: |
+      ansible.builtin.shell: |
         openssl ca -batch -in dc-req.pem -out demoCA/certs/dc-cert.pem \
         -cert demoCA/certs/cacert.pem -extfile demoCA/{{ extension_file_KDC }} \
         -extensions kdc_cert
+
+    - name: Check if file repo is present
+      ansible.builtin.shell: ls /mnt/space
+      register: repo_dir
+
+    - name: Add NFS repo
+      become: true
+      ansible.builtin.shell: mount 10.4.0.3:/space /mnt/space
+      when: repo_dir.stdout == ""
+
+
+    - name: install pkg for tokens
+      become: true
+      apt_rpm:
+        pkg:
+          - opensc
+          - librtpkcs11ecp
+          - pcsc-tools
+          - gnutls-utils
+        state: present
+        update_cache: yes
+
+    - name: Check polkit for pcsc
+      ansible.builtin.shell: pcsc_scan -r
+      register: pcsc_scan
+      ignore_errors: yes
+
+    - name: Permit pcsc for all. Attention on colon in stdout. Use quote the entire line.
+      become: true
+      ansible.builtin.replace:
+        path: /usr/share/polkit-1/actions/org.debian.pcsc-lite.policy
+        regexp: '>no<'
+        replace: '>yes<'
+        backup: yes
+      when: 'pcsc_scan.stderr == "SCardEstablishContext: RPC transport error."'
+
+    - name: Check cert on rutoken
+      ansible.builtin.shell: pkcs11-tool --module /usr/lib64/librtpkcs11ecp.so --list-object --type cert
+      register: cert_on_rutoken
+
+    - name: Delete old cert on rutoken
+      ansible.builtin.shell: |
+        pkcs11-tool --module /usr/lib64/librtpkcs11ecp.so -p 12345678 -l \
+        --delete-object --type cert --id {{ samba_2fa_id_token }}
+      when: "samba_2fa_label_rutoken in cert_on_rutoken.stdout"
+
+        #- meta: end_play
+     
+
+
+    - name: Check key on rutoken
+      ansible.builtin.shell: pkcs11-tool --module /usr/lib64/librtpkcs11ecp.so --list-object --type pubkey
+      register: pubkey_on_rutoken
+
+    - name: Delete old keys on rutoken
+      ansible.builtin.shell: |
+        p11tool --provider /usr/lib64/librtpkcs11ecp.so --login --set-pin=12345678 --batch \
+        --delete pkcs11:object={{ samba_2fa_label_rutoken }}
+      when: "samba_2fa_label_rutoken in pubkey_on_rutoken.stdout"
+
+
+    - meta: end_play
+
+
+
+      #    - name: Get objects on rutoken
+      #      ansible.builtin.shell: pkcs11-tool --module /usr/lib64/librtpkcs11ecp.so --list-object
+      #      register: objects_on_rutoken
+      #
+      #    - name: pubkey pattern
+      #      set_fact: pattern_cert="pubkey\\n\s.*label:\s.*"
+      #
+      #    - name: pubkey pattern 2
+      #      set_fact:
+      #        pubkey_and_label: "{{ pattern_cert }}{{ samba_2fa_label_rutoken }}"
+      #
+      #    - name: Delete old
+      #      ansible.builtin.shell: echo AAA
+      #      when: objects_on_rutoken.stdout is regex(pubkey_and_label)
+      #
+      #
+      #    - name: Debug version
+      #      debug:
+      #        msg: "{{ objects_on_rutoken.stdout | regex_search(version_re, '\\1', multiline=true) | first }}"
+      #      vars:
+      #        version_re: '{{ pattern_cert }}{{ samba_2fa_label_rutoken }}'
+      #
+      #
+      #
+      #    - meta: end_play
+      #
+      #    - name: Generate key on rutoken
+      #      ansible.builtin.shell: |
+      #        pkcs11-tool --module /usr/lib64/librtpkcs11ecp.so -p 12345678 -l \
+      #        --keypairgen --key-type RSA:1024 --id {{ samba_2fa_id_token }} \
+      #        --label {{ samba_2fa_label_rutoken }}
+
+        # p11tool --provider /usr/lib64/librtpkcs11ecp.so --login --set-pin=12345678 --delete "pkcs11:object=samba_2fa_label_rutoken" --batch

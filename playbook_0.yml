@@ -1,0 +1,12 @@
+---
+- name: Enable sudo for user "user" without password
+  hosts: all
+  remote_user: root
+
+  tasks:
+   - name: Edit sudoers
+     ansible.builtin.lineinfile:
+        path: /etc/sudoers
+          #        search_string: '# WHEEL_USERS ALL=\(ALL\) NOPASSWD: ALL'
+        insertafter: '# WHEEL_USERS ALL=\(ALL\) NOPASSWD: ALL'
+        line: 'USER ALL=(ALL) NOPASSWD: ALL'
