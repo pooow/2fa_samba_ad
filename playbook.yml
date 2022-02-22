@@ -7,6 +7,8 @@
     extension_file_KDC: ./extension_file_KDC
     samba_2fa_id_token: 7947
     samba_2fa_label_rutoken: 2fa_samba_ad
+    gen_key_token: no
+    extension_file_user: ./extension_file_user
 
   tasks:
     - name: Remove demoCA
@@ -33,15 +35,20 @@
 
     - name: Create KDC req
       shell: |
-        openssl req -new -out dc-req.pem -key demoCA/private/dc-key.pem \
+        openssl req -new -out demoCA/dc-req.csr -key demoCA/private/dc-key.pem \
         -subj "/C=RU/ST=Moscow/O=Basealt/CN=dc2"
 
     - name: Create (copy) extension file for KDC cert
       copy: src={{ extension_file_KDC }} dest=demoCA/{{ extension_file_KDC }}
 
+
+    - name: Create (copy) extension file for user cert
+      copy: src={{ extension_file_user }} dest=demoCA/{{ extension_file_user }}
+
+
     - name: Create KDC cert
       ansible.builtin.shell: |
-        openssl ca -batch -in dc-req.pem -out demoCA/certs/dc-cert.pem \
+        openssl ca -batch -in demoCA/dc-req.csr -out demoCA/certs/dc-cert.pem \
         -cert demoCA/certs/cacert.pem -extfile demoCA/{{ extension_file_KDC }} \
         -extensions kdc_cert
 
@@ -63,6 +70,7 @@
           - librtpkcs11ecp
           - pcsc-tools
           - gnutls-utils
+          - libp11                    # for openssl engine
         state: present
         update_cache: yes
 
@@ -78,7 +86,14 @@
         regexp: '>no<'
         replace: '>yes<'
         backup: yes
-      when: 'pcsc_scan.stderr == "SCardEstablishContext: RPC transport error."'
+      when: pcsc_scan.stderr is regex("SCardEstablishContext.*RPC transport error")
+
+
+    - name: Enable pcscd.socket
+      become: true
+      ansible.builtin.systemd:
+        state: started
+        name: pcscd.socket
 
     - name: Check cert on rutoken
       ansible.builtin.shell: pkcs11-tool --module /usr/lib64/librtpkcs11ecp.so --list-object --type cert
@@ -90,9 +105,6 @@
         --delete-object --type cert --id {{ samba_2fa_id_token }}
       when: "samba_2fa_label_rutoken in cert_on_rutoken.stdout"
 
-        #- meta: end_play
-     
-
 
     - name: Check key on rutoken
       ansible.builtin.shell: pkcs11-tool --module /usr/lib64/librtpkcs11ecp.so --list-object --type pubkey
@@ -102,12 +114,78 @@
       ansible.builtin.shell: |
         p11tool --provider /usr/lib64/librtpkcs11ecp.so --login --set-pin=12345678 --batch \
         --delete pkcs11:object={{ samba_2fa_label_rutoken }}
-      when: "samba_2fa_label_rutoken in pubkey_on_rutoken.stdout"
+      when: (samba_2fa_label_rutoken in pubkey_on_rutoken.stdout) and
+            (gen_key_token == "yes")
+
+
+    - name: Check key on rutoken 2
+      ansible.builtin.shell: pkcs11-tool --module /usr/lib64/librtpkcs11ecp.so --list-object --type pubkey
+      register: pubkey_on_rutoken2
+
+    - name: Generate keys for users on token
+      ansible.builtin.shell:
+        pkcs11-tool --module /usr/lib64/librtpkcs11ecp.so -p 12345678 -l \
+        --keypairgen --key-type rsa:2048 --id {{ samba_2fa_id_token }} \
+        --label {{ samba_2fa_label_rutoken }}
+      when: "samba_2fa_label_rutoken not in pubkey_on_rutoken2.stdout"
+
+
+    - name: Openssl engine pkcs11 setup 1
+      become: yes
+      ansible.builtin.lineinfile: 
+        path: /etc/openssl/openssl.cnf
+        state: present
+        insertbefore: BOF
+        line: openssl_conf = openssl_def
+
+    - name: Openssl engine pkcs11 setup 2
+      become: yes
+      ansible.builtin.blockinfile:
+        path: /etc/openssl/openssl.cnf
+        state: present
+        insertafter: EOF
+        block: |
+          [ openssl_def ]
+                  engines = engine_section
+          [ engine_section ]
+                  pkcs11 = pkcs11_section
+          [ pkcs11_section ]
+                  dynamic_path = /usr/lib64/openssl/engines-1.1/pkcs11.so
+                  MODULE_PATH = /usr/lib64/pkcs11/librtpkcs11ecp.so
+        backup: yes
+
+            
+    - name: Create user req
+      shell: |
+        openssl req -new -out demoCA/2fa_user.csr -keyform engine -engine pkcs11 \
+        -key pkcs11:object={{ samba_2fa_label_rutoken }} -passin pass:12345678 \
+        -subj "/C=RU/ST=Moscow/O=Basealt/CN=2fa_user"
+
+    - name: Issue cert for users
+      ansible.builtin.shell: |
+        openssl ca -batch -in demoCA/2fa_user.csr -out demoCA/certs/2fa_user.pem \
+        -cert demoCA/certs/cacert.pem -extfile demoCA/{{ extension_file_user }} \
+        -extensions kdc_user
+
+    - name: Create cert req for users
+      ansible.builtin.shell: echo
+
+    - name: Issue cert for users
+      ansible.builtin.shell: echo
+
+    - name: Copy cert for user on token
+      ansible.builtin.shell: |
+        pkcs11-tool --module /usr/lib64/librtpkcs11ecp.so -p 12345678 -l \
+        --write-object ./demoCA/certs/2fa_user.pem --type cert \
+        --id {{ samba_2fa_id_token }} --label {{ samba_2fa_label_rutoken }}
+
 
 
     - meta: end_play
 
 
+    - name: Generate cert for users
+      ansible.builtin.shell: echo
 
       #    - name: Get objects on rutoken
       #      ansible.builtin.shell: pkcs11-tool --module /usr/lib64/librtpkcs11ecp.so --list-object
