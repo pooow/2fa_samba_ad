@@ -1,0 +1,22 @@
+== 2FA в домене Samba AD
+
+=== adsfasdf
+
+[source,shell]
+----
+samba-tool domain info 127.0.0.1
+Forest           : test2.alt
+Domain           : test2.alt
+Netbios domain   : TEST2
+DC name          : dc2.test2.alt
+DC netbios name  : DC2
+Server site      : Default-First-Site-Name
+Client site      : Default-First-Site-Name
+----
+
+=== adfadf';lkl'adkf
+adfasdfk'kl
+adfka'sdkl sdf;asdf adjf ajdf;adjfk assdfkj asdfkj akdsjf a;djf akdfj a;dskflj
+adsfkj asdkjf a;dkjfa;dlkfj a;ldfjk a;df ja ;kjk d;afkjd f;akdjf ;af dkj
+f;akjdsf ;adkjf ;adkfj a;dfjk k +
+ghbdtn ghdf;j j j aksfjdk

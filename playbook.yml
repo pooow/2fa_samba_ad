@@ -1,6 +1,6 @@
 ---
 - name: Generate CA
-  hosts: sp8-srv-20211221
+  hosts: sp8_srv_20211221
   remote_user: user
 
   vars:
@@ -179,7 +179,172 @@
         --write-object ./demoCA/certs/2fa_user.pem --type cert \
         --id {{ samba_2fa_id_token }} --label {{ samba_2fa_label_rutoken }}
 
+    - name: Stop Samba. For copy certs and keys.
+      become: yes
+      ansible.builtin.systemd:
+        state: stopped
+        name: samba.service
 
+    - name: Remove old certs and keys from Samba
+      become: yes
+      ansible.builtin.file:
+        path: /var/lib/samba/private/tls/
+        state: absent
+
+    - name: Create tls folder from Samba
+      become: yes
+      ansible.builtin.file:
+        path: /var/lib/samba/private/tls
+        state: directory
+
+    - name: Copy CA cert to samba
+      become: yes
+      ansible.builtin.copy:
+        src: demoCA/certs/cacert.pem
+        dest: /var/lib/samba/private/tls/cacert.pem
+        remote_src: yes
+          
+    - name: Copy DC key to samba
+      become: yes
+      ansible.builtin.copy:
+        src: demoCA/private/dc-key.pem
+        dest: /var/lib/samba/private/tls/dc-key.pem
+        mode: 0600
+        remote_src: yes
+
+    - name: Copy DC cert to samba
+      become: yes
+      ansible.builtin.copy:
+        src: demoCA/certs/dc-cert.pem
+        dest: /var/lib/samba/private/tls/dc-cert.pem
+        remote_src: yes
+
+    - name: Add TLS to smb.conf
+      become: yes
+      ansible.builtin.blockinfile:
+        path: /etc/samba/smb.conf
+        state: present
+        insertafter: "use rfc2307"
+        block: |
+                  tls enabled = yes
+                  tls certfile = /var/lib/samba/private/tls/dc-cert.pem
+                  tls keyfile = /var/lib/samba/private/tls/dc-key.pem
+                  tls cafile = /var/lib/samba/private/tls/cacert.pem
+        backup: yes
+
+
+    - name: Add pkinit to kerberos on samba AD 1
+      become: yes
+      ansible.builtin.lineinfile:
+        path: /etc/krb5.conf
+        state: present
+        insertafter: "dns_lookup_kdc"
+        line: '         pkinit_anchors = FILE:/var/lib/samba/private/tls/cacert.pem'
+
+    - name: Add pkinit to kerberos on samba AD 2
+      become: yes
+      ansible.builtin.blockinfile:
+        path: /etc/krb5.conf
+        state: present
+        insertafter: EOF
+        block: |
+          [kdc]
+          enable-pkinit = yes
+          pkinit_identity = FILE:/var/lib/samba/private/tls/dc-cert.pem,/var/lib/samba/private/tls/dc-key.pem
+          pkinit_anchors = FILE:/var/lib/samba/private/tls/cacert.pem
+          pkinit_principal_in_certificate = yes
+          pkinit_win2k_require_binding = yes
+        backup: yes
+
+    - name: Reload Samba after edit krb5.conf.
+      become: yes
+      ansible.builtin.systemd:
+        state: restarted
+        daemon_reload: yes
+        name: samba.service
+          
+    - name: Check Samba AD user exist
+      become: yes
+      ansible.builtin.shell: |
+        samba-tool user list
+      register: samba_user_check_exist
+
+    - name: Create Samba AD user
+      become: yes
+      ansible.builtin.shell: |
+        samba-tool user create 2fa_user 'Pa$$word' --given-name='2fa_user'
+      when: not samba_user_check_exist.stdout is regex("2fa_user")
+
+    - name: Copy CA cert to ansible host
+      ansible.builtin.fetch:
+        src: /home/user/demoCA/certs/cacert.pem
+        dest: /tmp/prefix--cacert.pem
+        flat: yes        
+
+- name: RUN on client
+  hosts: sp8_ws_20211221
+  remote_user: user
+
+  vars:
+    extension_file_KDC: ./extension_file_KDC
+    samba_2fa_id_token: 7947
+    samba_2fa_label_rutoken: 2fa_samba_ad
+    gen_key_token: no
+    extension_file_user: ./extension_file_user
+
+  tasks:
+          
+    - name: Copy CA cert to member domain host
+      become: yes
+      ansible.builtin.copy:
+        src: /tmp/prefix--cacert.pem
+        dest: /etc/pki/tls/certs/cacert.pem
+
+    - name: Add pkinit to krb5.conf on client host
+      become: yes
+      ansible.builtin.blockinfile:
+        path: /etc/krb5.conf
+        state: present
+        insertafter: "default_ccache_name"
+        block: |
+          pkinit_anchors = DIR:/etc/pki/tls/certs/
+          pkinit_identities = PKCS11:librtpkcs11ecp.so:certid=7947
+          canonicalize = True
+        backup: yes
+          
+    - name: Add cert auth to sssd.conf on client host 1
+      become: yes
+      ansible.builtin.blockinfile:
+        path: /etc/sssd/sssd.conf
+        state: present
+        insertafter: '\[pam\]'
+        block: |
+          pam_cert_auth = True
+          pam_p11_allowed_services = +mate-screensaver, +lightdm
+          pam_cert_db_path = /etc/pki/tls/certs/cacert.pem
+        marker: "# Add cert auth to sssd.conf on client host 1"
+        backup: yes
+
+    - name: Add cert auth to sssd.conf on client host 2
+      become: yes
+      ansible.builtin.blockinfile:
+        path: /etc/sssd/sssd.conf
+        state: present
+        insertafter: EOF
+        block: |
+          [certmap/test2.alt/adcerts]
+          maprule = (|(userPrincipal={subject_principal})(samAccountName={subject_principal.short_name}))
+        marker: "# Add cert auth to sssd.conf on client host 2"
+        backup: yes
+          
+ 
+    - name: Reload sssd after edit sssd.conf
+      become: yes
+      ansible.builtin.systemd:
+        state: restarted
+        daemon_reload: yes
+        name: sssd.service
+          
 
     - meta: end_play
 

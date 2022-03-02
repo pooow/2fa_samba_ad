@@ -1,12 +1,54 @@
 ---
 - name: Enable sudo for user "user" without password
-  hosts: all
+  hosts: 2fa
   remote_user: root
 
   tasks:
-   - name: Edit sudoers
-     ansible.builtin.lineinfile:
+    - name: Edit sudoers
+      ansible.builtin.lineinfile:
         path: /etc/sudoers
-          #        search_string: '# WHEEL_USERS ALL=\(ALL\) NOPASSWD: ALL'
         insertafter: '# WHEEL_USERS ALL=\(ALL\) NOPASSWD: ALL'
         line: 'USER ALL=(ALL) NOPASSWD: ALL'
+
+    - name: Check if file repo is present
+      ansible.builtin.shell: ls /mnt/space
+      register: repo_dir
+
+    - name: Add NFS repo
+      ansible.builtin.shell: mount 10.4.0.3:/space /mnt/space
+      when: repo_dir.stdout == ""
+
+
+    - name: install pkg for tokens
+      apt_rpm:
+        pkg:
+          - opensc
+          - librtpkcs11ecp
+          - pcsc-tools
+          - gnutls-utils
+          - libp11                    # for openssl engine
+        state: present
+        update_cache: yes
+
+          #    - name: Check polkit for pcsc
+          #      ansible.builtin.shell: pcsc_scan -r
+          #      register: pcsc_scan
+          #      ignore_errors: yes
+
+    - name: Permit pcsc for all. Attention on colon in stdout. Use quote the entire line.
+      ansible.builtin.replace:
+        path: /usr/share/polkit-1/actions/org.debian.pcsc-lite.policy
+        regexp: '>no<'
+        replace: '>yes<'
+        backup: yes
+          #      when: pcsc_scan.stderr is regex("SCardEstablishContext.*RPC transport error")
+
+
+    - name: Enable pcscd.socket
+      ansible.builtin.systemd:
+        state: started
+        name: pcscd.socket
+
+
+
+
